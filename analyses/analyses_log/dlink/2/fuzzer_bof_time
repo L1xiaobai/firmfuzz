@@ -1,0 +1,9 @@
++ ./fuzzer/fuzzer.py bof dlink 2 192.168.0.1
+strings: Warning: './2/etc/scripts/upnp' is a directory
+strings: Warning: './2/htdocs/upnp' is a directory
+strings: Warning: './2/htdocs/upnpdevdesc' is a directory
+strings: Warning: './2/htdocs/upnpinc' is a directory
+
+real	109m38.761s
+user	0m3.242s
+sys	0m0.658s

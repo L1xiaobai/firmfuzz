@@ -22,7 +22,8 @@ mkdir -p $EXPLOIT_DIR
 sleep 10
 
 echo '[*] FirmAE web server initializer'
-{ time ./initializer.py $BRAND $TARGET > $LOG_DIR/initializer_log ; } 2> $LOG_DIR/initializer_time
+echo "[DEBUG] BRAND=$BRAND TARGET=$TARGET LOG_DIR=$LOG_DIR"
+{ time python3 ./initializer.py $BRAND $TARGET > $LOG_DIR/initializer_log ; } 2> $LOG_DIR/initializer_time
 { time nmap -O -sV $TARGET -oX $LOG_DIR/nmap_log.txt ; } 2> $LOG_DIR/nmap_time
 echo '[*] fuzzer'
 { time ./fuzzer/fuzzer.py ci $BRAND $IID $TARGET > $LOG_DIR/fuzzer_log_ci ; } 2> $LOG_DIR/fuzzer_ci_time

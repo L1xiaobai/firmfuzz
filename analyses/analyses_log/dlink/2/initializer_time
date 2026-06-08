@@ -1,0 +1,11 @@
++ python3 ./initializer.py dlink 192.168.0.1
+./initializer.py:90: DeprecationWarning: use driver.switch_to.default_content instead
+  self.driver.switch_to_default_content()
+./initializer.py:78: DeprecationWarning: use driver.switch_to.alert instead
+  alert = self.driver.switch_to_alert()
+./initializer.py:78: DeprecationWarning: use driver.switch_to.alert instead
+  alert = self.driver.switch_to_alert()
+
+real	1m22.000s
+user	0m0.681s
+sys	0m3.763s
