@@ -1,0 +1,9 @@
++ ./fuzzer/fuzzer.py ci dlink 2 192.168.0.1
+strings: Warning: './2/etc/scripts/upnp' is a directory
+strings: Warning: './2/htdocs/upnp' is a directory
+strings: Warning: './2/htdocs/upnpdevdesc' is a directory
+strings: Warning: './2/htdocs/upnpinc' is a directory
+
+real	107m41.111s
+user	0m7.217s
+sys	0m0.985s

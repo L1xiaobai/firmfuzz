@@ -43,7 +43,7 @@ class Initializer:
         options.add_argument('--headless')
         options.add_argument('--no-sandbox')
         options.add_argument('--screen-size=1200x600')
-        self.driver = webdriver.Chrome(chrome_options=options)
+        self.driver = webdriver.Chrome(options=options)
         if self.auth:
             self.driver.get('http://' + self.auth + '@' + self.ip)
         else:

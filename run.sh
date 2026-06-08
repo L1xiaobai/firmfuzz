@@ -194,6 +194,17 @@ function run_emulation()
         t_start="$(date -u +%s.%N)"
         ./scripts/makeImage.sh $IID $ARCH $FILENAME \
             2>&1 > ${WORK_DIR}/makeImage.log
+
+        if [ -e ${WORK_DIR}/llm_validate.json ]; then
+            if (egrep -sqi '"valid":[[:space:]]*true' ${WORK_DIR}/llm_validate.json); then
+                echo "[LLM] pipeline enabled for IID=${IID} (validated)"
+            else
+                echo "[LLM] pipeline fallback for IID=${IID} (see llm_validate.json)"
+            fi
+        else
+            echo "[LLM] pipeline not enabled for IID=${IID}"
+        fi
+
         t_end="$(date -u +%s.%N)"
         time_image="$(bc <<<"$t_end-$t_start")"
         echo $time_image > ${WORK_DIR}/time_image

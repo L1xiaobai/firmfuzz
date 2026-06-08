@@ -3,6 +3,7 @@
 import sys
 import getopt
 import re
+import json
 import struct
 import socket
 import stat
@@ -95,13 +96,35 @@ echo "Done!"
 """
 
 def mountImage(targetDir):
-    loopFile = subprocess.check_output(['bash', '-c', 'source firmae.config && add_partition %s/image.raw' % targetDir]).decode().strip()
-    os.system('mount %s %s/image > /dev/null' % (loopFile, targetDir))
-    time.sleep(1)
-    return loopFile
+    last_error = None
+    for _ in range(3):
+        loopFile = subprocess.check_output(
+            ['bash', '-c', 'source firmae.config && add_partition %s/image.raw' % targetDir]
+        ).decode().strip()
+
+        # Use subprocess so we can detect mount failures instead of continuing silently.
+        mount_ret = subprocess.call(
+            ['mount', loopFile, '%s/image' % targetDir],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        if mount_ret == 0 and os.path.ismount('%s/image' % targetDir):
+            time.sleep(1)
+            return loopFile
+
+        last_error = "mount failed for %s -> %s/image" % (loopFile, targetDir)
+        try:
+            subprocess.check_output(
+                ['bash', '-c', 'source firmae.config && del_partition %s' % loopFile.rsplit('p', 1)[0]]
+            )
+        except Exception:
+            pass
+        time.sleep(1)
+
+    raise RuntimeError(last_error if last_error else "mount failed")
 
 def umountImage(targetDir, loopFile):
-    os.system('umount %s/image > /dev/null' % targetDir)
+    subprocess.call(['umount', '%s/image' % targetDir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.check_output(['bash', '-c', 'source firmae.config && del_partition %s' % loopFile.rsplit('p', 1)[0]])
 
 def checkVariable(key):
@@ -481,6 +504,8 @@ def inferNetwork(iid, arch, endianness, init):
     targetDir = SCRATCHDIR + '/' + str(iid)
 
     loopFile = mountImage(targetDir)
+    if not os.path.ismount('%s/image' % targetDir):
+        raise RuntimeError("image mount is not active: %s/image" % targetDir)
 
     fileType = subprocess.check_output(["file", "-b", "%s/image/%s" % (targetDir, init)]).decode().strip()
     print("[*] Infer test: %s (%s)" % (init, fileType))
@@ -488,7 +513,26 @@ def inferNetwork(iid, arch, endianness, init):
     with open(targetDir + '/image/firmadyne/network_type', 'w') as out:
         out.write("None")
 
+    llm_meta_path = targetDir + '/llm_render_meta.json'
+    llm_meta = None
+    llm_enabled = False
+    if os.path.exists(llm_meta_path):
+        try:
+            with open(llm_meta_path, 'r') as f:
+                llm_meta = json.load(f)
+            llm_enabled = bool(llm_meta and llm_meta.get("llm_script_valid", False))
+        except Exception:
+            llm_meta = None
+            llm_enabled = False
+
     qemuInitValue = 'rdinit=/firmadyne/preInit.sh'
+    if init.endswith('llm_entry.sh'):
+        qemuInitValue = 'rdinit=/firmadyne/llm_entry.sh'
+        print("[LLM] selected init candidate: /firmadyne/llm_entry.sh")
+        if llm_meta:
+            print("[LLM] render meta: valid=%s fallback=%s" % (
+                llm_meta.get("llm_script_valid"), llm_meta.get("fallback_mode")))
+
     if os.path.exists(targetDir + '/service'):
         webService = open(targetDir + '/service').read().strip()
     else:
@@ -497,7 +541,20 @@ def inferNetwork(iid, arch, endianness, init):
     targetFile = ''
     targetData = ''
     out = None
-    if not init.endswith('preInit.sh'): # rcS, preinit
+    if init.endswith('llm_entry.sh'):
+        # For network inference we still need explicit network/service startup hooks.
+        # Append temporarily and restore after probe.
+        targetFile = targetDir + '/image/firmadyne/llm_entry.sh'
+        targetData = readWithException(targetFile)
+        out = open(targetFile, 'a')
+        out.write('\n/firmadyne/network.sh &\n')
+        if webService:
+            out.write('/firmadyne/run_service.sh &\n')
+        out.write('/firmadyne/debug.sh\n')
+        out.write('/firmadyne/busybox sleep 36000\n')
+        out.close()
+        print("[LLM] probe hooks injected into /firmadyne/llm_entry.sh")
+    elif not init.endswith('preInit.sh'): # rcS, preinit
         if fileType.find('ELF') == -1 and fileType.find("symbolic link") == -1: # maybe script
             targetFile = targetDir + '/image/' + init
             targetData = readWithException(targetFile)
@@ -533,11 +590,16 @@ def inferNetwork(iid, arch, endianness, init):
     cmd += " 2>&1 > /dev/null"
     os.system(cmd)
 
-    loopFile = mountImage(targetDir)
-    if not os.path.exists(targetDir + '/image/firmadyne/nvram_files'):
-        print("Infer NVRAM default file!\n")
-        os.system("{}/inferDefault.py {}".format(SCRIPTDIR, iid))
-    umountImage(targetDir, loopFile)
+    # Best-effort remount for nvram inference. Do not fail the whole network
+    # inference if this remount fails in container loop-device edge cases.
+    try:
+        loopFile = mountImage(targetDir)
+        if not os.path.exists(targetDir + '/image/firmadyne/nvram_files'):
+            print("Infer NVRAM default file!\n")
+            os.system("{}/inferDefault.py {}".format(SCRIPTDIR, iid))
+        umountImage(targetDir, loopFile)
+    except Exception as e:
+        print("[!] skip nvram infer due to remount failure: %s" % e)
 
     data = open("%s/qemu.initial.serial.log" % targetDir, 'rb').read()
 
@@ -633,10 +695,26 @@ def process(iid, arch, endianness, makeQemuCmd=False, outfile=None):
     global SCRIPTDIR
     global SCRATCHDIR
 
-    for init in open(SCRATCHDIR + "/" + str(iid) + "/init").read().split('\n')[:-1]:
+    init_file = SCRATCHDIR + "/" + str(iid) + "/init"
+    inits = open(init_file).read().split('\n')[:-1]
+    # For network inference stability, prefer native firmware init candidates first.
+    # Keep llm_entry.sh as fallback candidate.
+    llm_inits = [x for x in inits if x.endswith('/firmadyne/llm_entry.sh')]
+    native_inits = [x for x in inits if not x.endswith('/firmadyne/llm_entry.sh')]
+    inits = native_inits + llm_inits
+    if llm_inits:
+        print("[LLM] init list is LLM-augmented; reordered to try native init first")
+    print("[*] init candidates order: %r" % inits)
+    for init in inits:
         with open(SCRATCHDIR + "/" + str(iid) + "/current_init", 'w') as out:
             out.write(init)
-        qemuInitValue, networkList, targetFile, targetData, ports = inferNetwork(iid, arch, endianness, init)
+        if init.endswith('/firmadyne/llm_entry.sh'):
+            print("[LLM] trying candidate: %s" % init)
+        try:
+            qemuInitValue, networkList, targetFile, targetData, ports = inferNetwork(iid, arch, endianness, init)
+        except Exception as e:
+            print("[-] inferNetwork failed for init %s: %s" % (init, e))
+            continue
 
         print("[*] ports: %r" % ports)
         # check network interfaces and add script in the file system
@@ -683,15 +761,26 @@ def process(iid, arch, endianness, makeQemuCmd=False, outfile=None):
             os.chmod(outfile, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
 
             os.system('./scripts/check_emulation.sh {} {}'.format(iid, arch + endianness))
+            ping_res = "false"
+            web_res = "false"
+            ip_res = "None"
+            if os.path.exists(SCRATCHDIR + '/' + str(iid) + '/ping'):
+                ping_res = open(SCRATCHDIR + '/' + str(iid) + '/ping').read().strip()
+            if os.path.exists(SCRATCHDIR + '/' + str(iid) + '/web'):
+                web_res = open(SCRATCHDIR + '/' + str(iid) + '/web').read().strip()
+            if os.path.exists(SCRATCHDIR + '/' + str(iid) + '/ip'):
+                ip_res = open(SCRATCHDIR + '/' + str(iid) + '/ip').read().strip()
+            print("[*] emulation check result: init=%s ping=%s web=%s ip=%s" %
+                  (init, ping_res, web_res, ip_res))
 
             if (os.path.exists(SCRATCHDIR + '/' + str(iid) + '/web') and
                 open(SCRATCHDIR + '/' + str(iid) + '/web').read().strip() == 'true'):
                 success = True
                 break
 
-        # restore infer network data
-        # targetData is '' when init is preInit.sh
-        if targetData != '':
+        # restore infer network data if we patched a target file.
+        # targetData can be empty for valid files, so key on targetFile.
+        if targetFile != '':
             targetDir = SCRATCHDIR + '/' + str(iid)
             loopFile = mountImage(targetDir)
             with open(targetFile, 'w') as out:
