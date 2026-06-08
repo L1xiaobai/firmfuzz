@@ -1,0 +1,3 @@
+#!/usr/bin/python3
+from binwalk.__main__ import main
+main()
